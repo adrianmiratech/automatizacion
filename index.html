@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nebula Transfer</title>
+<style>
+:root{color-scheme:dark;--bg:#090d18;--panel:#121a2b;--line:#26334c;--text:#eef3ff;--muted:#9eacc7;--blue:#6ea8ff;--green:#42d392}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 50% 0,#17284a 0,#090d18 48%);font:15px system-ui,Segoe UI,Arial;color:var(--text);min-height:100vh;display:grid;place-items:center;padding:24px}
+main{width:min(760px,100%)}header{text-align:center;margin-bottom:22px}h1{letter-spacing:.12em;margin:8px 0;font-size:clamp(25px,5vw,38px)}header p,.muted{color:var(--muted)}.logo{font-size:36px}.panel{background:rgba(18,26,43,.94);border:1px solid var(--line);border-radius:20px;padding:22px;margin:14px 0;box-shadow:0 18px 60px #0005}
+label{display:block;color:var(--muted);font-size:13px;margin:12px 0 6px}input[type=text]{width:100%;padding:12px 14px;border-radius:10px;border:1px solid var(--line);background:#0b1220;color:var(--text);font:inherit}
+button{border:0;border-radius:11px;padding:12px 17px;background:var(--blue);color:#071326;font-weight:700;cursor:pointer}button:disabled{opacity:.45;cursor:not-allowed}.secondary{background:#263650;color:var(--text)}.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.drop{border:2px dashed #425575;border-radius:16px;padding:32px 16px;text-align:center;background:#0c1423;transition:.15s}.drop.over{border-color:var(--blue);background:#14233b}.drop strong{display:block;font-size:18px;margin-bottom:7px}.file{margin-top:12px;color:var(--muted);overflow-wrap:anywhere}.bar{height:12px;background:#26334c;border-radius:99px;overflow:hidden;margin:12px 0}.bar>div{height:100%;width:0;background:linear-gradient(90deg,#5795ff,#42d392);transition:width .2s}.status{padding:11px 13px;background:#0b1220;border-radius:10px;color:var(--muted);white-space:pre-wrap;overflow-wrap:anywhere}.ok{color:var(--green)}.small{font-size:12px;color:var(--muted);line-height:1.5}a{color:#9fc4ff}.hidden{display:none}
+</style>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body>
+<main>
+<header><div class="logo">☁</div><h1>NEBULA TRANSFER</h1><p>Claude → Google Drive · Transferencia reanudable</p></header>
+<section class="panel">
+  <h2>1. Conectar Google Drive</h2>
+  <p class="muted">La aplicación solicita permiso para crear y gestionar únicamente los archivos que cree con ella.</p>
+  <label for="clientId">Google OAuth Client ID (tipo Aplicación web)</label>
+  <input id="clientId" type="text" placeholder="123456789-abc.apps.googleusercontent.com" autocomplete="off">
+  <div class="row" style="margin-top:12px"><button id="connect">Conectar con Google</button><span id="authState" class="muted">No conectado</span></div>
+  <label for="folderId">ID de carpeta de Drive (opcional)</label>
+  <input id="folderId" type="text" placeholder="Vacío = Mi unidad">
+  <p class="small">Para guardar en una carpeta concreta, pega su ID (la parte final de la URL de la carpeta). El permiso drive.file permite crear archivos desde esta aplicación, no explorar toda tu unidad.</p>
+</section>
+<section class="panel">
+  <h2>2. Seleccionar vídeo</h2>
+  <div id="drop" class="drop">
+    <strong>Arrastra aquí tu vídeo</strong>
+    <span class="muted">o selecciónalo desde tu ordenador</span>
+    <div style="margin-top:15px"><button id="choose" class="secondary">Seleccionar vídeo</button><input id="file" type="file" accept="video/*,.mp4,.mov,.mkv,.webm" class="hidden"></div>
+    <div id="fileInfo" class="file">Ningún archivo seleccionado</div>
+  </div>
+  <div class="row" style="margin-top:15px"><button id="upload" disabled>Subir a Google Drive</button><button id="clear" class="secondary" disabled>Limpiar</button></div>
+  <div class="bar"><div id="progress"></div></div>
+  <div id="status" class="status" role="status">Esperando conexión y archivo.</div>
+  <div id="result" class="hidden" style="margin-top:12px"></div>
+</section>
+<section class="panel">
+  <h2>Cómo se utiliza</h2>
+  <ol class="muted">
+    <li>Descarga el vídeo terminado desde Claude Web.</li>
+    <li>Conecta Google con tu OAuth Client ID.</li>
+    <li>Arrastra el vídeo y pulsa «Subir a Google Drive».</li>
+    <li>Espera a que aparezca el enlace de Drive.</li>
+  </ol>
+  <p class="small">La subida usa sesiones reanudables de Google Drive. Mantén esta pestaña abierta durante la transferencia. Esta primera versión no guarda tokens ni credenciales en un servidor.</p>
+</section>
+<footer class="small" style="text-align:center">Nebula Devs · Nebula Transfer 1.0 · Aplicación local del usuario</footer>
+</main>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const CHUNK = 8 * 1024 * 1024; // múltiplo de 256 KiB
+  let tokenClient = null, accessToken = null, selectedFile = null, busy = false;
+  const status = msg => $('status').textContent = msg;
+  function setProgress(n){$('progress').style.width = Math.max(0,Math.min(100,n))+'%';}
+  function setAuth(ok){$('authState').textContent=ok?'Conectado a Google':'No conectado';$('authState').className=ok?'ok':'muted';$('upload').disabled=!(ok&&selectedFile&&!busy);}
+  function selectFile(f){
+    if(!f)return;
+    if(!f.type.startsWith('video/') && !/\.(mp4|mov|mkv|webm|m4v)$/i.test(f.name)){status('Selecciona un archivo de vídeo (MP4, MOV, MKV o WebM).');return;}
+    if(f.size > 1024*1024*1024){status('El archivo supera 1 GB. Esta versión está configurada para vídeos de hasta 1 GB.');return;}
+    selectedFile=f;$('fileInfo').textContent=`${f.name} · ${(f.size/1024/1024).toFixed(1)} MB`;$('clear').disabled=false;
+    $('result').classList.add('hidden');setProgress(0);setAuth(!!accessToken);status('Vídeo listo para subir.');
+  }
+  $('choose').onclick=()=>$('file').click();
+  $('file').onchange=e=>selectFile(e.target.files[0]);
+  $('clear').onclick=()=>{selectedFile=null;$('file').value='';$('fileInfo').textContent='Ningún archivo seleccionado';$('clear').disabled=true;setAuth(!!accessToken);setProgress(0);status('Archivo retirado.');};
+  const drop=$('drop');
+  ['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('over');}));
+  ['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.remove('over');}));
+  drop.addEventListener('drop',e=>selectFile(e.dataTransfer.files[0]));
+  $('connect').onclick=()=>{
+    const clientId=$('clientId').value.trim();
+    if(!clientId){status('Introduce primero el OAuth Client ID de Google.');return;}
+    if(!window.google?.accounts?.oauth2){status('No se ha cargado Google Identity Services. Comprueba tu conexión y recarga.');return;}
+    tokenClient=google.accounts.oauth2.initTokenClient({
+      client_id:clientId,scope:'https://www.googleapis.com/auth/drive.file',
+      callback:resp=>{
+        if(resp.error){status('Error de autorización: '+resp.error);return;}
+        accessToken=resp.access_token;setAuth(true);status('Google Drive conectado. Ya puedes subir el vídeo.');
+      }
+    });
+    tokenClient.requestAccessToken({prompt:'consent'});
+  };
+  async function startUpload(file, token, folderId){
+    const metadata={name:file.name,mimeType:file.type||'application/octet-stream'};
+    if(folderId)metadata.parents=[folderId];
+    const init=await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&fields=id,name,mimeType,size,webViewLink',{
+      method:'POST',
+      headers:{Authorization:'Bearer '+token,'Content-Type':'application/json; charset=UTF-8',
+        'X-Upload-Content-Type':metadata.mimeType,'X-Upload-Content-Length':String(file.size)},
+      body:JSON.stringify(metadata)
+    });
+    if(!init.ok)throw new Error('No se pudo iniciar la subida ('+init.status+'): '+await init.text());
+    const session=init.headers.get('Location');
+    if(!session)throw new Error('Google no devolvió la URL de sesión reanudable.');
+    let start=0;
+    while(start<file.size){
+      const end=Math.min(start+CHUNK,file.size);
+      let res;
+      try{
+        res=await fetch(session,{method:'PUT',headers:{'Content-Length':String(end-start),'Content-Range':`bytes ${start}-${end-1}/${file.size}`},body:file.slice(start,end)});
+      }catch(err){
+        // Consultar al servidor cuánto ha recibido antes de reintentar.
+        const probe=await fetch(session,{method:'PUT',headers:{'Content-Range':`bytes */${file.size}`},body:new Blob([])});
+        if(probe.status===308){
+          const range=probe.headers.get('Range');
+          start=range?Number(range.split('-').pop())+1:0;
+          continue;
+        }
+        if(probe.ok)return await probe.json();
+        throw new Error('Se interrumpió la conexión. Vuelve a pulsar subir para iniciar una nueva transferencia.');
+      }
+      if(res.status===308){
+        const range=res.headers.get('Range');
+        start=range?Number(range.split('-').pop())+1:end;
+        setProgress(file.size?start/file.size*100:100);
+      }else if(res.ok){
+        setProgress(100);return await res.json();
+      }else{
+        throw new Error('Google Drive respondió '+res.status+': '+await res.text());
+      }
+    }
+    throw new Error('La transferencia terminó sin confirmación final de Google.');
+  }
+  $('upload').onclick=async()=>{
+    if(!selectedFile||!accessToken||busy)return;
+    busy=true;$('upload').disabled=true;$('clear').disabled=true;$('result').classList.add('hidden');setProgress(0);status('Iniciando transferencia segura…');
+    try{
+      const data=await startUpload(selectedFile,accessToken,$('folderId').value.trim());
+      status('¡Vídeo subido y confirmado por Google Drive!');$('result').classList.remove('hidden');
+      const link=data.webViewLink||('https://drive.google.com/file/d/'+data.id+'/view');
+      $('result').innerHTML=`<p class="ok"><strong>Subida completada</strong></p><p>${escapeHtml(data.name||selectedFile.name)}</p><p><a href="${link}" target="_blank" rel="noopener">Abrir vídeo en Google Drive</a></p>`;
+    }catch(e){status('No se pudo completar la subida.\n'+e.message+'\nComprueba permisos, conexión y carpeta de destino.');}
+    finally{busy=false;$('clear').disabled=!selectedFile;setAuth(!!accessToken);}
+  };
+  function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+})();
+</script>
+</body>
+</html>
